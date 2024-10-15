@@ -1,0 +1,194 @@
+#include <cstring>
+#include <iostream>
+#include <openssl/rsa.h>
+
+#include "../common/contextmanager.h"
+#include "../common/crypto.h"
+#include "../common/net.h"
+#include "../common/protocol.h"
+#include "../common/vec.h"
+#include "../common/file.h"
+
+#include "server_commands.h"
+#include "server_parsing.h"
+#include "server_storage.h"
+#include <libgen.h>
+
+using namespace std;
+
+bool is_kbloc(vec &block){
+  return vec_to_string(block) == "KEY";
+}
+
+/// When a new client connection is accepted, this code will run to figure out
+/// what the client is requesting, and to dispatch to the right function for
+/// satisfying the request.
+///
+/// @param sd      The socket on which communication with the client takes place
+/// @param pri     The private key used by the server
+/// @param pub     The public key file contents, to send to the client
+/// @param storage The Storage object with which clients interact
+///
+/// @returns true if the server should halt immediately, false otherwise
+bool serve_client(int sd, RSA *pri, const vec &pub, Storage &storage) {
+  string tmp = "here";
+  write_file("alpha.txt", tmp.c_str(), strlen(tmp.c_str()));
+
+  //char buf[LEN_RKBLOCK];
+  vec bytesReadFromClient(LEN_RKBLOCK);
+  int bytesReadFromClientInteger = reliable_get_to_eof_or_n(sd, bytesReadFromClient.begin(), LEN_RKBLOCK);
+  if(bytesReadFromClientInteger > 0){
+    // Then we did read the right amount of stuff
+    string tmp = vec_to_string(bytesReadFromClient);
+    write_file("delta.txt", tmp.c_str(), strlen(tmp.c_str()));
+  }
+
+  bool kBlock = is_kbloc(bytesReadFromClient);
+  if(kBlock){
+    server_cmd_key(sd, pub);
+  }
+
+  // We have an Rblock
+  unsigned char from[LEN_RKBLOCK];              // Used for the RSA_private_decrypt function
+  unsigned char to[LEN_RBLOCK_CONTENT];
+
+  for(int i = 0; i < LEN_RKBLOCK; i++){
+    from[i] = bytesReadFromClient.at(i);
+  }
+  // decrypt rblock into the char named 'to'
+  int result = RSA_private_decrypt(LEN_RBLOCK_CONTENT, from, to, pri, RSA_PKCS1_OAEP_PADDING);
+  if(result == -1 || result == 0){ // If there is an error in decryption
+    string decrypted = to_string(result);
+    write_file("echo.txt", decrypted.c_str(), strlen(decrypted.c_str()));
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+  std::string decrypted(reinterpret_cast<char*>(to));
+  write_file("golf.txt", decrypted.c_str(), strlen(decrypted.c_str()));
+  return false;
+/*
+  vec::iterator pos = 
+  unsigned char *next_byte = &*pos;
+  int bytesReadInteger  = read(sd, buf, LEN_RKBLOCK);
+  if(bytesReadInteger ! = LEN_RKBLOCK){
+    // Then we did read the right amount of stuff
+    string tmp = to_string(bytesReadInteger);
+    write_file("delta.txt", tmp.c_str(), strlen(tmp.c_str()));
+  }
+
+  // Check if the request is a key request
+  for(int i = 0; i < LEN_RKBLOCK; i++){
+    kBlock.push_back(bytesReadFromClient.at(i));
+  }
+  
+  std::string checkKey(kBlock.begin(), kBlock.end());
+  checkKey = checkKey.substr(0,3);
+  if(strcmp("KEY", (const char *)checkKey.c_str())){ // double check if we've got an off by one error in checkKey
+      bool shouldServerStop = false;
+      server_cmd_key(sd, pub); 
+      return shouldServerStop;
+  }
+ 
+  unsigned char from[LEN_RKBLOCK]; 
+  unsigned char to[LEN_RBLOCK_CONTENT];
+  vec rBlock = vec_from_string(constructor);
+
+  //reading in the rBlock from bytesReadFromClient
+  //NB: from is used to decrypt
+  //NB: for loop uses LEN_RKBLOCK becaue we are reading the encrypted r block
+  for(int i = 0; i < LEN_RKBLOCK; i++){
+    rBlock.push_back(bytesReadFromClient.at(i));
+    from[i] = bytesReadFromClient.at(i);
+  }
+  // decrypt rblock
+  // int RSA_public_decrypt(int flen, unsigned char *from, unsigned char *to, RSA *rsa, int padding);
+
+  //now "to" should have the decrypted r block 
+  int result = RSA_private_decrypt(LEN_RKBLOCK, from, to, pri, RSA_PKCS1_OAEP_PADDING);
+  if(result == -1 || result == 0){
+    cout << "tremendous failure in RSA decryption";
+  }
+  //extract from rblock, what cmd, what aeskey, what length of encrypted a block
+  char cmd[3];
+  cmd[0] = to[0];
+  cmd[1] = to[1];
+  cmd[2] = to[2];
+  char aesKey[AES_KEYSIZE + AES_BLOCKSIZE];
+  vec aesKeyVector = vec_from_string(constructor);
+  
+  for(int i = 0; i < AES_KEYSIZE + AES_BLOCKSIZE; i++){
+    aesKeyVector.push_back(to[i]);
+    aesKey[i] = to[i+3];
+  }
+  int aBlockLength = (int)to[3 + AES_KEYSIZE + AES_BLOCKSIZE];
+  std::string aBlockLengthString = std::to_string(aBlockLength);
+  std::string requirementBuilder = "";
+  requirementBuilder.append((const char *)cmd);
+  requirementBuilder.append((const char *)aesKey);
+  requirementBuilder += aBlockLengthString;
+  //vec rBlockDecryptedVector = vec_from_string(requirementBuilder);
+  // lets print out contents of Rblock
+  cout << "Requirement builder: " << requirementBuilder;
+
+  //read in the rest of encrypted a block
+
+  vec aBlock = vec_from_string(constructor);
+  //char aBlockChars[aBlockLength];
+ 
+ //NB: i should start at LEN_RKBLOCK SINCE bytesReadFromClient() is encrypted
+  for(int i = LEN_RKBLOCK; i < aBlockLength + LEN_RKBLOCK; i++){
+    aBlock.push_back(bytesReadFromClient.at(i));
+    //aBlockChars[i] = bytesReadFromClient.at(i);
+  }
+  
+  EVP_CIPHER_CTX * ctx = create_aes_context(aesKeyVector, false);
+  
+  // decrypt ablock
+  vec decryptedABlock = aes_crypt_msg(ctx, aBlock);
+  bool success  = reset_aes_context(ctx, aesKeyVector, true);  
+  if(!success){
+    cerr << "failed to reset aes cypher object";
+    // Should send back a response
+  }
+  // pass stuff to server_commands.cc methods
+
+  // Check what the cmd is
+   if(strcmp((const char *)cmd, "ALL")){
+      
+      //EVP_CIPHER_CTX *create_aes_context(const vec &key, bool encrypt)
+      bool shouldServerStop = server_cmd_all(sd, storage, ctx, (const vec)decryptedABlock); 
+      return shouldServerStop;
+  }
+  if(strcmp((const char *)cmd, "SET")){
+     
+      //EVP_CIPHER_CTX *create_aes_context(const vec &key, bool encrypt)
+      bool shouldServerStop = server_cmd_set(sd, storage, ctx, (const vec)decryptedABlock); 
+      return shouldServerStop;
+  }
+  if(strcmp((const char *)cmd, "GET")){
+      
+      //EVP_CIPHER_CTX *create_aes_context(const vec &key, bool encrypt)
+      bool shouldServerStop = server_cmd_get(sd, storage, ctx, (const vec)decryptedABlock); 
+      return shouldServerStop;
+  }
+  if(strcmp((const char *)cmd, "REG")){
+      
+      //EVP_CIPHER_CTX *create_aes_context(const vec &key, bool encrypt)
+      bool shouldServerStop = server_cmd_reg(sd, storage, ctx, (const vec)decryptedABlock); 
+      return shouldServerStop;
+  }
+   if(strcmp((const char *)cmd, "BYE")){
+      
+      //EVP_CIPHER_CTX *create_aes_context(const vec &key, bool encrypt)
+      bool shouldServerStop = server_cmd_bye(sd, storage, ctx, (const vec)decryptedABlock); 
+      return shouldServerStop;
+  }
+   if(strcmp((const char *)cmd, "SAV")){
+      
+      //EVP_CIPHER_CTX *create_aes_context(const vec &key, bool encrypt)
+      bool shouldServerStop = server_cmd_sav(sd, storage, ctx, (const vec)decryptedABlock); 
+      return shouldServerStop;
+  }
+
+  return false;
+  */
+}

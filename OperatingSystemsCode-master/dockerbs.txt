@@ -1,0 +1,12 @@
+apt-get update
+apt install python3
+
+
+restart docker
+restart docker container
+recompile
+screen
+screen
+python3 ../scripts/p1.py SERVER VERBOSE
+
+then check your outfile

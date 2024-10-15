@@ -1,0 +1,6 @@
+RxwmgndCCeLWQa+FK0BJ0Q==
+
+./client.exe -k rsa -u alice -w password -s localhost -p 9997 -C REG
+
+
+./server.exe -p 9997 -f filey -k rsa

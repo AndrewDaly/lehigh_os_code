@@ -1,0 +1,55 @@
+bool serve_client(int sd, RSA *pri, const vec &pub, Storage &storage) {
+  //read in our vectors first
+
+  //reading in first 256 for the rblock
+  //int reliable_get_to_eof_or_n(int sd, vec::iterator pos, int amnt) {
+  vec bytesReadFromClient = reliable_get_to_eof(sd);
+  std::string constructor = "";
+  unsigned char from[LEN_RBLOCK_CONTENT];
+  unsigned char to[LEN_RBLOCK_CONTENT];
+  vec rBlock = vec_from_string(constructor); 
+  for(int i = 0; i < LEN_RBLOCK_CONTENT; i++){
+    rBlock.push_back(bytesReadFromClient.at(i));
+    from[i] = bytesReadFromClient.at(i);
+  }
+  // decrypt rblock
+  // int RSA_public_decrypt(int flen, unsigned char *from, unsigned char *to, RSA *rsa, int padding);
+  int result = RSA_public_decrypt(LEN_RBLOCK_CONTENT, from, to, pri, RSA_PKCS1_OAEP_PADDING );
+  if(result == -1 || result == 0){
+    cout << "tremendous failure";
+  }
+  
+  //extract from rblock, what cmd, what aeskey, what length of encrypted a block
+  char cmd[3];
+  cmd[0] = to[0];
+  cmd[1] = to[1];
+  cmd[2] = to[2];
+  char aesKey[AES_KEYSIZE];
+  for(int i = 0; i < AES_KEYSIZE; i++){
+    aesKey[i] = to[i+3];
+  }
+  
+  
+ // int aBlockLength = (int)to[35];
+  // lets print out contents of Rblock
+
+  string temp1(cmd);
+  string temp2(aesKey);
+  //string temp3(aBlockLength);
+  cout << temp1<<" : " << temp2 << " : ";
+
+  //read in the rest of encrypted a block
+
+
+  // decrypt ablock
+
+  // pass stuff to server_commands.cc methods
+
+
+
+
+    //first decrypt
+
+  cerr << "serve_client is not implemented\n";
+  return false;
+}

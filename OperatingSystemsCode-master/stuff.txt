@@ -1,0 +1,46 @@
+
+// transit kblock
+std::size_t transmitBytes = 0;
+const int howManyBytesToSend = LEN_RKBLOCK;
+char * next_byte = 
+  while(howManyBytesToSend){
+    std::size_t sent = send(sd, keyBlock, howManyBytesToSend, 0);
+    if (sent <= 0) {
+        if (errno != EINTR) {
+          error_message_and_exit(0, errno, "Error in send(): ");
+        }
+      } else {
+        next_byte += sent;
+        remain -= sent;
+      }
+    }
+  }
+
+  transmitBytes = transmitBytes + LEN_RKBLOCK;
+
+  int remain  = LEN_RSA_PUBKEY;
+
+  char buf[LEN_RSA_PUBKEY + 1] = {0};
+  next_byte = buf;
+    while (remain) {
+      // NB: recv() with last parameter 0 is the same as read() syscall
+      ssize_t rcd = recv(sd, next_byte, remain, 0);
+      // NB: as above, 0 bytes received means server closed socket, and -1 means
+      //     an error.  EINTR means try again, otherwise we will just crash.
+      if (rcd <= 0) {
+        if (errno != EINTR) {
+          if (rcd == 0) {
+            fprintf(stderr, "Error in recv(): EOF\n");
+            exit(0);
+          } else {
+            error_message_and_exit(0, errno, "Error in recv(): ");
+          }
+        }
+      } else {
+        next_byte += rcd;
+        remain -= rcd;
+      }
+    }
+
+  //we've gotten the key in buf, we write it to a file
+

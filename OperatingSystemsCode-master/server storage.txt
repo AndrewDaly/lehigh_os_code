@@ -1,0 +1,312 @@
+#include <iostream>
+#include <openssl/md5.h>
+#include <unordered_map>
+#include <utility>
+
+#include "../common/contextmanager.h"
+#include "../common/err.h"
+#include "../common/protocol.h"
+#include "../common/vec.h"
+
+#include "../common/file.h"
+#include "server_storage.h"
+#include <string.h>
+
+
+using namespace std;
+
+
+/// Storage::Internal is the private struct that holds all of the fields of the
+/// Storage object.  Organizing the fields as an Internal is part of the PIMPL
+/// pattern.
+struct Storage::Internal {
+  /// AuthTableEntry represents one user stored in the authentication table
+  struct AuthTableEntry {
+    /// The name of the user; max 64 characters
+    string username;
+
+    /// The hashed password.  Note that the password is a max of 128 chars
+    string pass_hash;
+
+    /// The user's content
+    vec content;
+  };
+
+  /// A unique 8-byte code to use as a prefix each time an AuthTable Entry is
+  /// written to disk.
+  ///
+  /// NB: this isn't needed in assignment 1, but will be useful for backwards
+  ///     compatibility later on.
+  inline static const string AUTHENTRY = "AUTHAUTH";
+
+  /// The map of authentication information, indexed by username
+  unordered_map<string, AuthTableEntry> auth_table;
+
+  /// filename is the name of the file from which the Storage object was loaded,
+  /// and to which we .ist the Storage object every time it changes
+  string filename = "";
+
+  /// Construct the Storage::Internal object by setting the filename
+  ///
+  /// @param fname The name of the file that should be used to load/store the
+  ///              data
+  Internal(const string &fname) : filename(fname) {}
+};
+
+/// Construct an empty object and specify the file from which it should be
+/// loaded.  To avoid exceptions and errors in the constructor, the act of
+/// loading data is separate from construction.
+///
+/// @param fname The name of the file that should be used to load/store the
+///              data
+Storage::Storage(const string &fname) : fields(new Internal(fname)) {}
+
+/// Destructor for the storage object.
+///
+/// NB: The compiler doesn't know that it can create the default destructor in
+///     the .h file, because PIMPL prevents it from knowing the size of
+///     Storage::Internal.  Now that we have reified Storage::Internal, the
+///     compiler can make a destructor for us.
+Storage::~Storage() = default;
+
+/// Populate the Storage object by loading an auth_table from this.filename.
+/// Note that load() begins by clearing the auth_table, so that when the call
+/// is complete, exactly and only the contents of the file are in the
+/// auth_table.
+///
+/// @returns false if any error is encountered in the file, and true
+///          otherwise.  Note that a non-existent file is not an error.
+bool Storage::load() {
+  this->fields->auth_table.clear();
+  const string filename = this->fields->filename;
+  vec fileResult = load_entire_file(filename);
+  if(fileResult.size() == 0){
+      string tmp = "File not found: " + filename;
+      cerr << tmp << endl;
+      write_file("load_debug1.txt", tmp.c_str(), strlen(tmp.c_str()));
+    //send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_NO_USER)));
+    return true; //because the file is nonexistent
+  }
+    string tmp = "message\n";
+  write_file("debuggingfirst.txt", tmp.c_str(), strlen(tmp.c_str()));
+
+  // read in auth table entries
+  // append them into this
+  // this->add_user
+  // 8 bytes for AUTHAUTH, 4 bytes for userLength, LEN_UNAME for username length maximum, 4 for passhash length, LEN_PASS for password maximum
+  size_t numBytesRead = 0;
+  int index = 0;
+  while(numBytesRead < fileResult.size()){ // This should get updated to be a measure of the number of bytes taht have been read so far
+    char auth[8];
+    char userNameLength[4];
+    
+    // The first 8 bytes should be AUTHAUTH, read in the AUTHAUTH bytes
+    for(int i = 0; i < 8; i++){
+      auth[i] = fileResult.at(i + index);
+    }
+    // Check that these bytes are actually "AUTHAUTH"
+    if(auth[0]){}
+
+    // Read in the userNameLength bytes
+    index = 8;
+    for(int i = 0; i < 4; i++){
+      userNameLength[i] = fileResult.at(i + index);
+    }
+    int userNameLengthInteger = (int)userNameLength[0];
+    char userNameContent[userNameLengthInteger];
+
+    // Read in the userNameString bytes
+    index = 12;
+    for(int i = 0; i < userNameLengthInteger; i++){
+      userNameContent[i] = fileResult.at(i + index);
+    }
+
+    char passHashLength[4];
+    index = index + userNameLengthInteger;
+    for(int i = 0; i < 4; i++){
+      passHashLength[i] = fileResult.at(i + index);
+    }
+
+    int passHashLengthInteger = (int)passHashLength[0];
+    char passHashContent[passHashLengthInteger];
+    index = index + 4;
+    for(int i = 0; i < passHashLengthInteger; i++){
+      passHashLength[i] = fileResult.at(i + index);
+    }
+   
+     std::string userNameString(userNameContent);
+     std::string hashedPasswordString(passHashContent);
+     this->add_user((const string) userNameString, (const string)hashedPasswordString);
+
+      //deal with padding in a sec
+    
+      char padVecLength[4];
+      index = index + passHashLengthInteger;
+      for(int i = 0; i < 4; i++){
+        padVecLength[i] = fileResult.at(i + index);
+      }
+      int padVecLengthInteger = (int)padVecLength[0];
+      numBytesRead = index + padVecLengthInteger;
+  }
+
+  return true;
+}
+
+/// Create a new entry in the Auth table.  If the user_name already exists, we
+/// should return an error.  Otherwise, hash the password, and then save an
+/// entry with the username, hashed password, and a zero-byte content.
+///
+/// @param user_name The user name to register
+/// @param pass      The password to associate with that user name
+///
+/// @returns False if the username already exists, true otherwise
+bool Storage::add_user(const string &user_name, const string &pass) {
+  if(this->fields->auth_table.find(user_name) == this->fields->auth_table.end()){
+    return false;
+  }
+  struct Storage::Internal::AuthTableEntry demo;
+  demo.username = user_name;
+  demo.pass_hash = pass;
+  demo.content = vec_from_string("");
+  std::pair<std::string, Storage::Internal::AuthTableEntry> insertion(user_name, demo);
+  this->fields->auth_table.insert(insertion);
+  return true;
+}
+
+/// Set the data bytes for a user, but do so if and only if the password
+/// matches
+///
+/// @param user_name The name of the user whose content is being set
+/// @param pass      The password for the user, used to authenticate
+/// @param content   The data to set for this user
+///
+/// @returns empty vec on error, or "OK" on success
+vec Storage::set_user_data(const string &user_name, const string &pass,
+                           const vec &content) {
+  bool authenticated = this->auth(user_name, pass);
+  if(!authenticated){
+    return vec_from_string(RES_ERR_LOGIN);
+  }
+  this->fields->auth_table.at(user_name).content = content;
+  return vec_from_string(RES_OK);
+}
+
+/// Return a copy of the user data for a user, but do so only if the password
+/// matches
+///
+/// @param user_name The name of the user who made the request
+/// @param pass      The password for the user, used to authenticate
+/// @param who       The name of the user whose content is being fetched
+///
+/// @returns A pair with a bool to indicate error, and a vector indicating the
+///          data (possibly an error message) that is the result of the
+///          attempt.  Note that "no data" is an error
+pair<bool, vec> Storage::get_user_data(const string &user_name,
+                                       const string &pass, const string &who) {
+  
+  bool authenticated = this->auth(user_name, pass);
+  if(!authenticated){
+    vec retval = vec_from_string(RES_ERR_LOGIN);
+    std::pair<bool, vec> returnPair(true, retval);
+    return returnPair;
+  }
+  vec userContent = this->fields->auth_table.at(who).content;
+
+  return std::pair<bool, vec> (false, userContent);
+}
+
+/// Return a newline-delimited string containing all of the usernames in the
+/// auth table
+///
+/// @param user_name The name of the user who made the request
+/// @param pass      The password for the user, used to authenticate
+///
+/// @returns A vector with the data, or a vector with an error message
+pair<bool, vec> Storage::get_all_users(const string &user_name,
+                                       const string &pass) {
+  bool authenticated = this->auth(user_name, pass);
+  if(!authenticated){
+
+    return std::pair<bool, vec> (false, vec_from_string(RES_ERR_LOGIN));
+  } 
+  string retval = "";
+  for(const auto &user: this->fields->auth_table){
+    retval += user.first + '\n';
+  }
+  retval = retval.substr(0,retval.size()-1);
+  
+  return {true, vec_from_string(retval)};
+}
+
+/// Authenticate a user
+///
+/// @param user_name The name of the user who made the request
+/// @param pass      The password for the user, used to authenticate
+///
+/// @returns True if the user and password are valid, false otherwise
+bool Storage::auth(const string &user_name, const string &pass) {
+  //string passHash = hashFunction(user_name);
+   if(this->fields->auth_table.find(user_name) == this->fields->auth_table.end()){
+    return false;
+  }
+  unsigned char hashedSubmittedPassword[MD5_DIGEST_LENGTH];
+  int size = strlen(pass.c_str());
+  char password[size];
+  // Generate the MD5 hash of the password and save it to passHash
+  MD5((unsigned char*)&password, strlen(password), (unsigned char*)&hashedSubmittedPassword);
+
+  std::string passHashString(reinterpret_cast<char*>(hashedSubmittedPassword));
+
+  //look up the user's hashed password
+    //if the passHashString matches witht he database, return true
+
+  string storedHashedPassword = this->fields->auth_table.at(user_name).pass_hash;
+  
+  if(storedHashedPassword == passHashString){
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+
+}
+
+/// Write the entire Storage object (right now just the Auth table) to the
+/// file specified by this.filename.  To ensure durability, Storage must be
+/// persisted in two steps.  First, it must be written to a temporary file
+/// (this.filename.tmp).  Then the temporary file can be renamed to replace
+/// the older version of the Storage object.
+void Storage::persist() {
+  vec buffer;
+  string tempFileName = this->fields->filename + ".tmp";
+
+  for(const auto &index: this->fields->auth_table){
+    buffer = vec_from_string("AUTHAUTH");
+    int userLen = index.second.username.size();
+    vec_append(buffer, userLen);
+    vec_append(buffer, index.second.username);
+    int hashLen = index.second.pass_hash.size();
+    vec_append(buffer, hashLen);
+    vec_append(buffer, index.second.pass_hash);
+    int contentLen = index.second.content.size();
+    vec_append(buffer, contentLen);
+    vec_append(buffer, index.second.content);
+  }
+  //bool write_file(const std::string &filename, const char *data, size_t bytes);
+  const char * toWrite = vec_to_string(buffer).c_str();
+  bool success = write_file(tempFileName, toWrite, strlen(toWrite));
+  if(!success){
+    return;
+  }
+
+  success = write_file(this->fields->filename, toWrite, strlen(toWrite));
+  return;
+   } 
+
+/// Shut down the storage when the server stops.
+///
+/// NB: this is only called when all threads have stopped accessing the
+///     Storage object.  As a result, there's nothing left to do, so it's a
+///     no-op.
+void Storage::shutdown() {}

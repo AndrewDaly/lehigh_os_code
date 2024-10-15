@@ -1,0 +1,202 @@
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+#include <chrono>
+#include <unistd.h>
+
+#include "pool.h"
+
+#include <iostream>
+#include <fstream>
+
+using namespace std;
+
+/// thread_pool::Internal is the class that stores all the members of a
+/// thread_pool object. To avoid pulling too much into the .h file, we are using
+/// the PIMPL pattern
+/// (https://www.geeksforgeeks.org/pimpl-idiom-in-c-with-examples/)
+struct thread_pool::Internal
+{
+  /// construct the Internal object by setting the fields that are
+  /// user-specified
+  ///
+  /// @param handler The code to run whenever something arrives in the pool
+
+  Internal(function<bool(int)> handler) {} //This is supposed to stay as just a {}
+  //queue goes in here, queue of ints (socket ids)
+
+  queue<int> sdQueue;
+  mutex sdQueueMutex;
+  string debugString = "debugString";
+
+  atomic<bool> atomicVarBYE = false;
+
+  std::condition_variable cv;
+
+  std::vector<std::thread> threads;
+
+  function<void()> shut_down_handler;
+
+  atomic<size_t> numThreadsSleeping = 0;
+};
+
+/// construct a thread pool by providing a size and the function to run on
+/// each element that arrives in the queue
+///
+/// @param size    The number of threads in the pool
+/// @param handler The code to run whenever something arrives in the pool
+thread_pool::thread_pool(int size, function<bool(int)> handler) : fields(new Internal(handler))
+{
+  ofstream serverLogFile("poolLogFile.txt");
+  serverLogFile << "Here" << endl;
+  auto spinLock = [&]() {
+    ofstream spinLockLogFile("spinLockLogFile.txt");
+    spinLockLogFile << "entered lambda" << endl;
+    int socket = 0;
+    std::unique_lock<std::mutex> uLock(this->fields->sdQueueMutex);
+    while (true)
+    {
+      bool success = false;
+      //spinLockLogFile << "entered loop" << endl;
+      if(this->fields->sdQueue.size() > 0){
+        socket = this->fields->sdQueue.front();
+        this->fields->sdQueue.pop();
+        uLock.unlock();
+        spinLockLogFile << "unlocked" << endl;
+        spinLockLogFile << std::to_string(socket) << endl;
+        success = handler(socket);
+      }
+
+      if(this->fields->sdQueue.size() == 0){
+        uLock.unlock();
+        usleep(3000000);//waits for three seconds
+      }
+      if (!success)
+      {
+        //spinLockLogFile << "success" << endl;
+      }
+      if (socket)
+      {
+        close(socket);
+        break;
+      }
+      //spinLockLogFile << "end loop" << endl;
+    }
+    //wait until something is added to the queue
+    //when something is added, ask for a lock on the queue
+    //when you get the lock, read the next sd on the queue
+    //run handler(sd) in a waiting thread from our thread vector
+    //unlock()
+    //when that thread finishes, mark it as finished / put at the end of the thread vector
+  };
+  /*
+  auto wait = [&]() {
+   
+   // this->fields->sdQueueMutex.lock();
+    ofstream poolWaitLogFile("poolWaitLogFile.txt");
+    
+    //cout << "error string" << endl;
+    //this->fields->sdQueueMutex.unlock();
+    int socket = 0;
+    
+    while (!this->fields->atomicVarBYE)
+    {
+      poolWaitLogFile  << "first" << endl;
+      std::unique_lock<std::mutex> uLock(this->fields->sdQueueMutex);
+      poolWaitLogFile  << this->fields->debugString << endl;
+      
+      //is the queue empty?
+      if (this->fields->sdQueue.empty())
+      {
+        
+        //if shutdown is true
+       if(!check_active()){
+        
+        uLock.unlock(); //acquire lock
+        this->fields->shut_down_handler();
+       }
+       if( this->fields->numThreadsSleeping < this->fields->threads.size()-1){
+        this->fields->numThreadsSleeping++;
+        poolWaitLogFile  << "sleeps!" << endl;
+        this->fields->cv.wait(uLock);
+       }
+      }
+      
+      poolWaitLogFile  << "wakes!" << endl;
+      //if the queue is not empty
+      socket = this->fields->sdQueue.front();
+      this->fields->sdQueue.pop();
+      //uLock.unlock();
+      handler(socket);
+      close(socket);
+      if (!check_active())
+      {
+        uLock.lock(); //acquire lock, no other thread can start new work
+        this->fields->cv.notify_all();
+        this->fields->shut_down_handler();
+      }
+      
+    }
+    //wait until something is added to the queue
+    //when something is added, ask for a lock on the queue
+    //when you get the lock, read the next sd on the queue
+    //run handler(sd) in a waiting thread from our thread vector
+    //unlock()
+    //when that thread finishes, mark it as finished / put at the end of the thread vector
+  };*/
+
+  //p.tempsdQueueMutex = this->fields->sdQueueMutex;
+  for (int i = 0; i < 1; i++)
+  {
+    //this->fields->threads.push_back(std::thread(wait, this->fields->sdQueue));
+    this->fields->threads.push_back(std::thread(spinLock));
+  }
+}
+
+/// destruct a thread pool
+thread_pool::~thread_pool() = default;
+
+/// Allow a user of the pool to provide some code to run when the pool decides
+/// it needs to shut down.
+///
+/// @param func The code that should be run when the pool shuts down
+void thread_pool::set_shutdown_handler(function<void()> func)
+{
+  this->fields->shut_down_handler = func;
+}
+
+/// Allow a user of the pool to see if the pool has been shut down
+bool thread_pool::check_active() { return !this->fields->atomicVarBYE; }
+
+/// Shutting down the pool can take some time.  await_shutdown() lets a user
+/// of the pool wait until the threads are all done servicing clients.
+void thread_pool::await_shutdown()
+{
+
+  //wait until all threads are done servicing the client
+  for (std::size_t i = 0; i < this->fields->threads.size(); i++)
+  {
+    //  if(this->fields->threads.at(i).joinable()){
+    this->fields->threads.at(i).join();
+    //  }
+  }
+}
+
+/// When a new connection arrives at the server, it calls this to pass the
+/// connection to the pool for processing.
+///
+/// @param sd The socket descriptor for the new connection
+void thread_pool::service_connection(int sd)
+{
+  //So I think that service_connection just adds sd onto the queue of sd's
+  this->fields->sdQueueMutex.lock();
+  this->fields->sdQueue.push(sd);
+  ofstream serviceConnectionLog("serviceConnection.txt");
+  serviceConnectionLog << std::to_string(sd) << endl;
+  this->fields->sdQueueMutex.unlock();
+}

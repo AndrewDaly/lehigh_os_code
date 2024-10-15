@@ -1,0 +1,444 @@
+#include <string>
+
+#include "../common/crypto.h"
+#include "../common/net.h"
+#include "../common/protocol.h"
+#include "../common/vec.h"
+#include "../common/file.h"
+#include "string.h"
+
+#include "server_commands.h"
+#include "server_storage.h"
+
+using namespace std;
+//NB @param startingPoint is the length of the username + length of the username + 2 (for the '\n' characters)
+int getLengthOfVecInteger(int startingPoint, const vec &req)
+{
+  char intAsChar[4];
+  int index = 0;
+  for (size_t i = startingPoint; i < startingPoint + sizeof(intAsChar); i++)
+  {
+    intAsChar[index] = req.at(i);
+    index += 1;
+  }
+  return (int)intAsChar[0];
+}
+
+//return the username or an empty vector on failure
+string getUserName(Storage &storage, const vec &req)
+{
+  vec userName;
+  if (find(req.begin(),req.end(),'\n') == req.end())
+  {
+    return vec_to_string(userName);
+  }
+
+  for (size_t i = 0; i < req.size(); i++)
+  {
+    if (req.at(i) == '\n')
+    {
+      break;
+    }
+
+    userName.push_back(req.at(i));
+
+    //return an empty vector on failure
+    if (userName.size() == LEN_UNAME)
+    {
+      vec retval;
+      return vec_to_string(retval);
+    }
+  }
+
+  return vec_to_string(userName);
+}
+
+string getPassWord(Storage &storage, const vec &req, const int &start)
+{
+  // Parse out the password
+  vec password;
+  for (size_t i = start + 1; i < req.size(); i++)
+  { //NB:: req.size() -1 because we don't want the newline character in the password
+    if (req.at(i) == '\n')
+    {
+      break;
+    }
+    password.push_back(req.at(i));
+  }
+
+  // Check if the password is too long
+  if (password.size() > LEN_PASS)
+  { // If the password is too long return false
+    vec retval;
+    return vec_to_string(retval);
+  }
+  return vec_to_string(password);
+}
+
+/// Respond to an ALL command by generating a list of all the usernames in the
+/// Auth table and returning them, one per line.
+///
+/// @param sd      The socket onto which the result should be written
+/// @param storage The Storage object, which contains the auth table
+/// @param ctx     The AES encryption context
+/// @param req     The unencrypted contents of the request
+///
+/// @returns false, to indicate that the server shouldn't stop
+bool server_cmd_all(int sd, Storage &storage, EVP_CIPHER_CTX *ctx,
+                    const vec &req)
+{
+  string username = getUserName(storage, req);
+  string password = getPassWord(storage, req, username.size());
+  if (username.size() == 0 || password.size() == 0)
+  { // Then the user name or password was improperly formatted
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+  bool authenticate = storage.auth(username, password);
+  if (!authenticate)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_LOGIN)));
+    return false;
+  }
+  pair<bool, vec> pairUsers = storage.get_all_users(username, password);
+  if (pairUsers.first == false)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+  //vec encryptedContent = aes_crypt_msg(ctx, pairUsers.second);
+  vec stuffToSendBack = vec_from_string("OK");
+  vec_append(stuffToSendBack, pairUsers.second.size());
+  vec_append(stuffToSendBack, pairUsers.second);
+  vec encryptedStuffToSendBack = aes_crypt_msg(ctx, stuffToSendBack);
+  if (encryptedStuffToSendBack.size() == 0)
+  {
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+  send_reliably(sd, encryptedStuffToSendBack);
+  return false;
+}
+
+/// Respond to a SET command by putting the provided data into the Auth table
+///
+/// @param sd      The socket onto which the result should be written
+/// @param storage The Storage object, which contains the auth table
+/// @param ctx     The AES encryption context
+/// @param req     The unencrypted contents of the request
+///
+/// @returns false, to indicate that the server shouldn't stop
+bool server_cmd_set(int sd, Storage &storage, EVP_CIPHER_CTX *ctx,
+                    const vec &req)
+{
+  string username = getUserName(storage, req);
+  string password = getPassWord(storage, req, username.size());
+  if (username.size() == 0 || password.size() == 0)
+  { // Then the user name or password was improperly formatted
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+  bool authenticate = storage.auth(username, password);
+  if (!authenticate)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_LOGIN)));
+    return false;
+  }
+  int intOffSet = username.size() + password.size() + 2 * sizeof(char);
+  int length = getLengthOfVecInteger(intOffSet, req);
+  vec content;
+  int startContentBytes = intOffSet + sizeof(int);
+  for (int i = startContentBytes; i < length + startContentBytes; i++)
+  {
+    content.push_back(req.at(i));
+  }
+  storage.set_user_data(username, password, content);
+  vec okVec = vec_from_string("OK");
+  vec encryptedContent = aes_crypt_msg(ctx, okVec);
+  if (encryptedContent.size() == 0)
+  {
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+  bool success = send_reliably(sd, encryptedContent);
+  if (!success)
+  {
+    cerr << RES_ERR_XMIT;
+  }
+  return false;
+}
+
+/// Respond to a GET command by getting the data for a user
+///
+/// @param sd      The socket onto which the result should be written
+/// @param storage The Storage object, which contains the auth table
+/// @param ctx     The AES encryption context
+/// @param req     The unencrypted contents of the request
+///
+/// @returns false, to indicate that the server shouldn't stop
+bool server_cmd_get(int sd, Storage &storage, EVP_CIPHER_CTX *ctx,
+                    const vec &req)
+{
+  string username = getUserName(storage, req);
+  string password = getPassWord(storage, req, username.size());
+  if (username.size() == 0 || password.size() == 0)
+  { // Then the user name or password was improperly formatted
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+  bool authenticate = storage.auth(username, password);
+  if (!authenticate)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_LOGIN)));
+    return false;
+  }
+  int intOffSet = username.size() + password.size() + 2 * sizeof(char);
+  vec content;
+  for (size_t i = intOffSet; i < req.size(); i++)
+  {
+    content.push_back(req.at(i));
+  }
+
+  if (content.size() == 0)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+
+  string who = vec_to_string(content);
+
+  pair<bool, vec> pairData = storage.get_user_data(username, password, who);
+  if (pairData.second.size() == 0)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_NO_DATA)));
+    return false;
+  }
+
+  /// @returns false on error, true if the context is reset and ready to use again
+  vec encryptedContent = aes_crypt_msg(ctx, pairData.second);
+  if (encryptedContent.size() == 0)
+  {
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+
+  send_reliably(sd, encryptedContent);
+  return false;
+}
+
+/// Respond to a REG command by trying to add a new user
+///
+/// @param sd      The socket onto which the result should be written
+/// @param storage The Storage object, which contains the auth table
+/// @param ctx     The AES encryption context
+/// @param req     The unencrypted contents of the request
+///
+/// @returns false, to indicate that the server shouldn't stop
+bool server_cmd_reg(int sd, Storage &storage, EVP_CIPHER_CTX *ctx,
+                    const vec &req,  vec &aesKey)
+{
+
+  string username = getUserName(storage, req);
+  string password = getPassWord(storage, req, username.size());
+  string tmp = username + " : " + password;
+  EVP_CIPHER_CTX *enc = create_aes_context(aesKey, true);
+  EVP_CIPHER_CTX *dec = create_aes_context(aesKey, false);
+
+  char *Buffer;
+  Buffer = (char*) enc;
+  char *stuffer;
+  stuffer = (char*) dec;
+ 
+  write_file("enc.txt", Buffer, strlen(Buffer));
+  write_file("dec.txt", stuffer, strlen(stuffer));
+  
+  //This needs to communicate back to our client code over socket sd
+  
+  write_file("juliet.txt", tmp.c_str(), strlen(tmp.c_str()));
+  if (username.size() == 0 || password.size() == 0)
+  { // Then the user name or password was improperly formatted
+    write_file("foxtrot.txt", tmp.c_str(), strlen(tmp.c_str()));
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+  /*
+  bool authenticate = storage.auth(username, password);
+  if (!authenticate)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_LOGIN)));
+    return false;
+  }*/
+  bool addedUser = storage.add_user(username, password);
+  if (!addedUser)
+  {
+    write_file("zulu.txt", tmp.c_str(), strlen(tmp.c_str()));
+    //user is already in the table
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_USER_EXISTS)));
+  }
+
+
+  //EVP_CIPHER_CTX *ctxx = create_aes_context(aesKey, true);
+  string ok = "OK";
+  vec okVec = vec_from_string(ok);
+
+  EVP_CIPHER_CTX *okCTX = create_aes_context(aesKey, true);
+  vec encryptedOKVec = aes_crypt_msg(okCTX, okVec);
+  send_reliably(sd, encryptedOKVec);
+  string encryptedOKString = vec_to_string(encryptedOKVec);
+  write_file("encryptedOK.txt", encryptedOKString.c_str(), strlen(encryptedOKString.c_str()));
+
+  reset_aes_context(okCTX, aesKey, false);
+  vec decryptedOKVec = aes_crypt_msg(okCTX, encryptedOKVec);
+  string decryptedOKString = vec_to_string(decryptedOKVec);
+  write_file("decryptedOK.txt", decryptedOKString.c_str(), strlen(decryptedOKString.c_str()));
+
+  
+
+/*
+  string value = vec_to_string(encryptepInputTest);
+  write_file("whiskey.txt", value.c_str(), strlen(value.c_str()));
+  
+  
+  //reset_aes_context(ctxx, aesKey, false);
+  
+
+  vec decryptedmsg = aes_crypt_msg(ctxxx, encryptepInputTest);
+  string decrypted = vec_to_string(decryptedmsg);
+
+  write_file("tango.txt", decrypted.c_str(), strlen(decrypted.c_str()));
+
+*/
+  /*
+
+
+
+  
+//  vec okVec;
+
+  //at this point, ctx is true (so we're encrypting)
+  string ok = "OK";
+  vec encryptedContent = aes_crypt_msg(ctx, ok);
+  string faster = vec_to_string(encryptedContent);
+  write_file("hotel.txt", faster.c_str(), strlen(faster.c_str()));
+
+
+  //here we are resetting the context to decrypt using ctx 
+  reset_aes_context(ctx, aesKey, true);
+  //string encok = vec_to_string(encryptedContent);
+  vec to = aes_crypt_msg(ctx, ok);
+  string too = vec_to_string(to);
+  write_file("quebec.txt", too.c_str(), strlen(too.c_str()));
+
+
+  if (encryptedContent.size() == 0)
+  {
+    write_file("exray.txt", tmp.c_str(), strlen(tmp.c_str()));
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+ // vec_append(encryptedContent, EOF);
+  bool success = send_reliably(sd, encryptedContent);
+
+
+
+  if (!success)
+  {
+    write_file("papa.txt", tmp.c_str(), strlen(tmp.c_str()));
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_XMIT)));
+  }
+  */
+
+  return false;
+}
+
+/// In response to a request for a key, do a reliable send of the contents of
+/// the pubfile
+///
+/// @param sd The socket on which to write the pubfile
+/// @param pubfile A vector consisting of pubfile contents
+void server_cmd_key(int sd, const vec &pubfile)
+{
+  string tmp = "server_cmd_key \n";
+  write_file("server_cmd_key.txt", tmp.c_str(), strlen(tmp.c_str()));
+  bool success = send_reliably(sd, pubfile);
+  if (!success)
+  {
+    cerr << "server_cmd_key failed to send\n";
+  }
+}
+
+/// Respond to a BYE command by returning false, but only if the user
+/// authenticates
+///
+/// @param sd      The socket onto which the result should be written
+/// @param storage The Storage object, which contains the auth table
+/// @param ctx     The AES encryption context
+/// @param req     The unencrypted contents of the request
+///
+/// @returns true, to indicate that the server should stop, or false on an error
+bool server_cmd_bye(int sd, Storage &storage, EVP_CIPHER_CTX *ctx,
+                    const vec &req)
+{
+  string username = getUserName(storage, req);
+  string password = getPassWord(storage, req, username.size());
+  if (username.size() == 0 || password.size() == 0)
+  { // Then the user name or password was improperly formatted
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+  bool authenticate = storage.auth(username, password);
+  if (!authenticate)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_LOGIN)));
+    return false;
+  }
+  storage.persist();
+  vec okVec = vec_from_string("OK");
+  vec encryptedContent = aes_crypt_msg(ctx, okVec);
+  if (encryptedContent.size() == 0)
+  {
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+  bool success = send_reliably(sd, encryptedContent);
+  if (!success)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_XMIT)));
+  }
+  return true;
+}
+
+/// Respond to a SAV command by persisting the file, but only if the user
+/// authenticates
+///
+/// @param sd      The socket onto which the result should be written
+/// @param storage The Storage object, which contains the auth table
+/// @param ctx     The AES encryption context
+/// @param req     The unencrypted contents of the request
+///
+/// @returns false, to indicate that the server shouldn't stop
+bool server_cmd_sav(int sd, Storage &storage, EVP_CIPHER_CTX *ctx,
+                    const vec &req)
+{
+  string username = getUserName(storage, req);
+  string password = getPassWord(storage, req, username.size());
+  if (username.size() == 0 || password.size() == 0)
+  { // Then the user name or password was improperly formatted
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_MSG_FMT)));
+    return false;
+  }
+  bool authenticate = storage.auth(username, password);
+  if (!authenticate)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_LOGIN)));
+    return false;
+  }
+  storage.persist();
+  vec okVec = vec_from_string("OK");
+  vec encryptedContent = aes_crypt_msg(ctx, okVec);
+  if (encryptedContent.size() == 0)
+  {
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+  bool success = send_reliably(sd, encryptedContent);
+  if (!success)
+  {
+    send_reliably(sd, aes_crypt_msg(ctx, vec_from_string(RES_ERR_XMIT)));
+  }
+  return false;
+}

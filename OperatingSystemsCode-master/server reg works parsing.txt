@@ -1,0 +1,153 @@
+#include <cstring>
+#include <iostream>
+#include <openssl/rsa.h>
+
+#include "../common/contextmanager.h"
+#include "../common/crypto.h"
+#include "../common/net.h"
+#include "../common/protocol.h"
+#include "../common/vec.h"
+#include "../common/file.h"
+
+#include "server_commands.h"
+#include "server_parsing.h"
+#include "server_storage.h"
+#include <libgen.h>
+
+using namespace std;
+
+//returns true if @param block is kblock
+bool is_kbloc(vec &block)
+{
+  return (block.at(0) == 'K' && block.at(1) == 'E' && block.at(2) == 'Y');
+}
+
+/// When a new client connection is accepted, this code will run to figure out
+/// what the client is requesting, and to dispatch to the right function for
+/// satisfying the request.
+///
+/// @param sd      The socket on which communication with the client takes place
+/// @param pri     The private key used by the server
+/// @param pub     The public key file contents, to send to the client
+/// @param storage The Storage object with which clients interact
+///
+/// @returns true if the server should halt immediately, false otherwise
+bool serve_client(int sd, RSA *pri, const vec &pub, Storage &storage)
+{
+  //char buf[LEN_RKBLOCK];
+  vec bytesReadFromClient(LEN_RKBLOCK);
+  int bytesReadFromClientInteger = reliable_get_to_eof_or_n(sd, bytesReadFromClient.begin(), LEN_RKBLOCK);
+  if (bytesReadFromClientInteger > 0)
+  {
+    // Then we did read the right amount of stuff
+    string tmp = vec_to_string(bytesReadFromClient);
+    write_file("delta.txt", tmp.c_str(), strlen(tmp.c_str()));
+  }
+
+  bool kBlock = is_kbloc(bytesReadFromClient);
+  if (kBlock)
+  {
+    server_cmd_key(sd, pub);
+    return false;
+  }
+  /*
+  //NB: We read the K block, now we have to read the R block after we have gotten the K block
+  bytesReadFromClient.clear();
+  bytesReadFromClient(LEN_RKBLOCK);
+  int bytesReadFromClientInteger = reliable_get_to_eof_or_n(sd, bytesReadFromClient.begin(), LEN_RKBLOCK);
+*/
+  vec dec(LEN_RBLOCK_CONTENT);
+  // decrypt rblock
+  int result = RSA_private_decrypt(LEN_RKBLOCK, bytesReadFromClient.data(), dec.data(), pri, RSA_PKCS1_OAEP_PADDING);
+  if (result == -1 || result == 0)
+  { // If there is an error in decryption
+    string decrypted = to_string(result);
+    write_file("echo.txt", decrypted.c_str(), strlen(decrypted.c_str()));
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+
+  //now the R block is decrypted
+  //dec has the decrypted r block
+
+  //the server command we are going to run
+  vec cmd;
+
+  for (unsigned int i = 0; i < 3; i++)
+  {
+    cmd.push_back(dec.at(i));
+  }
+  //we will now populate aesKey from dec
+  vec aesKey;
+  for (unsigned int i = 3; i < AES_BLOCKSIZE + AES_KEYSIZE + 3; i++)
+  {
+    aesKey.push_back(dec.at(i));
+  }
+
+  char x[4];
+  for (unsigned int i = 0; i < sizeof(x); i++)
+  {
+    x[i] = dec.at(AES_BLOCKSIZE + AES_KEYSIZE + 3 + i);
+  }
+
+  int encryptedAblockLength = (int)x[0];
+
+  vec encryptedAblock(encryptedAblockLength);
+  bytesReadFromClientInteger = reliable_get_to_eof_or_n(sd, encryptedAblock.begin(), encryptedAblockLength);
+
+  //now we have encryptedAblock
+  EVP_CIPHER_CTX *ctx = create_aes_context(aesKey, false);
+  vec decryptedAblock = aes_crypt_msg(ctx, encryptedAblock);
+
+  string decrypted = string(decryptedAblock.begin(), decryptedAblock.end());
+  write_file("filey.txt", decrypted.c_str(), strlen(decrypted.c_str()));
+
+  string commands = string(cmd.begin(), cmd.end());
+  write_file("commandant.txt", commands.c_str(), strlen(commands.c_str()));
+
+/*
+  string test = "Alice\nAlice_is_awesomeAliceAlice_is_awesomeAliceAlice_is_awesome";
+  vec inputVec = vec_from_string(test);
+  EVP_CIPHER_CTX *ctxTest = create_aes_context(aesKey, true);
+  vec encryptepInputTest = aes_crypt_msg(ctxTest, inputVec);
+  string value = vec_to_string(encryptepInputTest);
+  write_file("shit.txt", test.c_str(), strlen(test.c_str()));
+  
+  
+  reset_aes_context(ctxTest, aesKey, false);
+  vec decryptedmsg = aes_crypt_msg(ctxTest, encryptepInputTest);
+  string decrypted = vec_to_string(decryptedmsg);
+
+  write_file("fuck.txt", decrypted.c_str(), strlen(decrypted.c_str()));
+*/
+
+  //send error decrypting back to client
+  if (decryptedAblock.size() == 0)
+  {
+    send_reliably(sd, RES_ERR_CRYPTO);
+  }
+
+  //setting the aes context to true 
+
+  if(vec_to_string(cmd) == "REG"){
+  reset_aes_context(ctx, aesKey, true);
+
+  server_cmd_reg(sd, storage, ctx, decryptedAblock,  aesKey);
+  }
+
+/*
+  // Iterate through possible commands, pick the right one, run it
+  vector<string> s = {REQ_REG, REQ_BYE, REQ_SAV, REQ_SET, REQ_GET, REQ_ALL};
+  decltype(server_cmd_reg) *cmds[] = {server_cmd_reg, server_cmd_bye,
+                                      server_cmd_sav, server_cmd_set,
+                                      server_cmd_get, server_cmd_all};
+  string command = vec_to_string(cmd);
+  for (size_t i = 0; i < s.size(); ++i)
+  {
+    if (command == s[i])
+    {
+      return cmds[i](sd, storage, ctx, decryptedAblock);
+    }
+  }
+*/
+  return false;
+}
